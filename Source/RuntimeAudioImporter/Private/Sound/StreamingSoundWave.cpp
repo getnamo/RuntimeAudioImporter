@@ -161,25 +161,6 @@ void UStreamingSoundWave::PopulateAudioDataFromDecodedInfo(FDecodedAudioStruct&&
 	//UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully added audio data to streaming sound wave.\nAdded audio info: %s"), *DecodedAudioInfo.ToString());
 }
 
-void UStreamingSoundWave::ReleaseMemory()
-{
-	Super::ReleaseMemory();
-	NumOfPreAllocatedByteData = 0;
-}
-
-void UStreamingSoundWave::ReleasePlayedAudioData(const FOnPlayedAudioDataReleaseResultNative& Result)
-{
-	FRAIScopeLock Lock(&*DataGuard);
-	const int64 NewPCMDataSize = (PCMBufferInfo->PCMNumOfFrames - GetNumOfPlayedFrames_Internal()) * NumChannels;
-
-	if (GetNumOfPlayedFrames_Internal() > 0 && NumOfPreAllocatedByteData > 0 && NewPCMDataSize < PCMBufferInfo->PCMData.GetView().Num())
-	{
-		NumOfPreAllocatedByteData -= (PCMBufferInfo->PCMData.GetView().Num() * sizeof(float)) - (NewPCMDataSize * sizeof(float));
-		NumOfPreAllocatedByteData = NumOfPreAllocatedByteData < 0 ? 0 : NumOfPreAllocatedByteData;
-	}
-	Super::ReleasePlayedAudioData(Result);
-}
-
 UStreamingSoundWave* UStreamingSoundWave::CreateStreamingSoundWave()
 {
 	if (!IsInGameThread())
