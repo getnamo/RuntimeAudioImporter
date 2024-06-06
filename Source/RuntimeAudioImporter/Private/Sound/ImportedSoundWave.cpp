@@ -2,8 +2,11 @@
 
 #include "Sound/ImportedSoundWave.h"
 #include "RuntimeAudioImporterDefines.h"
+#include "RuntimeAudioImporterLibrary.h"
 #include "AudioDevice.h"
 #include "Async/Async.h"
+#include "Engine/Engine.h"
+#include "AudioThread.h"
 #if UE_VERSION_OLDER_THAN(5, 2, 0)
 #include "AudioDevice.h"
 #else
@@ -17,7 +20,6 @@
 UImportedSoundWave::UImportedSoundWave(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
   , DataGuard(MakeShared<FCriticalSection>())
-  , DurationOffset(0)
   , PlaybackFinishedBroadcast(false)
   , PlayedNumOfFrames(0)
   , PCMBufferInfo(MakeShared<FPCMStruct>())
@@ -89,7 +91,6 @@ void UImportedSoundWave::DuplicateSoundWave(bool bUseSharedAudioBuffer, const FO
 	}
 	DuplicatedSoundWave->SetInternalFlags(EInternalObjectFlags::Async);
 	FRAIScopeLock Lock(&*DataGuard);
-	DuplicatedSoundWave->DurationOffset = DurationOffset;
 	DuplicatedSoundWave->PCMBufferInfo = bUseSharedAudioBuffer ? PCMBufferInfo : MakeShared<FPCMStruct>(*PCMBufferInfo);
 	DuplicatedSoundWave->bStopSoundOnPlaybackFinish = bStopSoundOnPlaybackFinish;
 	DuplicatedSoundWave->ImportedAudioFormat = ImportedAudioFormat;
@@ -334,6 +335,14 @@ void UImportedSoundWave::PopulateAudioDataFromDecodedInfo(FDecodedAudioStruct&& 
 {
 	FRAIScopeLock Lock(&*DataGuard);
 
+	// If the sound wave has not yet been filled in with audio data and the initial desired sample rate and the number of channels are set, resample and mix the channels
+	if (InitialDesiredSampleRate.IsSet() || InitialDesiredNumOfChannels.IsSet())
+	{
+		URuntimeAudioImporterLibrary::ResampleAndMixChannelsInDecodedInfo(DecodedAudioInfo,
+			InitialDesiredSampleRate.IsSet() ? InitialDesiredSampleRate.GetValue() : DecodedAudioInfo.SoundWaveBasicInfo.SampleRate,
+			InitialDesiredNumOfChannels.IsSet() ? InitialDesiredNumOfChannels.GetValue() : DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels);
+	}
+
 	const FString DecodedAudioInfoString = DecodedAudioInfo.ToString();
 
 	Duration = DecodedAudioInfo.SoundWaveBasicInfo.Duration;
@@ -460,89 +469,6 @@ void UImportedSoundWave::ReleaseMemory()
 	Duration = 0;
 }
 
-void UImportedSoundWave::ReleasePlayedAudioData(const FOnPlayedAudioDataReleaseResult& Result)
-{
-	ReleasePlayedAudioData(FOnPlayedAudioDataReleaseResultNative::CreateWeakLambda(this, [Result](bool bSucceeded)
-	{
-		Result.ExecuteIfBound(bSucceeded);
-	}));
-}
-
-void UImportedSoundWave::ReleasePlayedAudioData(const FOnPlayedAudioDataReleaseResultNative& Result)
-{
-	if (IsInGameThread())
-	{
-		AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [WeakThis = MakeWeakObjectPtr(this), Result]()
-		{
-			if (WeakThis.IsValid())
-			{
-				WeakThis->ReleasePlayedAudioData(Result);
-			}
-			else
-			{
-				UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Failed to release played audio data because the sound wave has been destroyed"));
-			}
-		});
-		return;
-	}
-
-	FRAIScopeLock Lock(&*DataGuard);
-
-	auto ExecuteResult = [Result](bool bSucceeded)
-	{
-		AsyncTask(ENamedThreads::GameThread, [Result, bSucceeded]()
-		{
-			Result.ExecuteIfBound(bSucceeded);
-		});
-	};
-
-	if (GetNumOfPlayedFrames_Internal() == 0)
-	{
-		UE_LOG(LogRuntimeAudioImporter, Warning, TEXT("No audio data will be released because the current playback time is zero"));
-		ExecuteResult(false);
-		return;
-	}
-
-	const int64 OldNumOfPCMData = PCMBufferInfo->PCMData.GetView().Num();
-	if (GetNumOfPlayedFrames_Internal() >= PCMBufferInfo->PCMNumOfFrames)
-	{
-		ReleaseMemory();
-		UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully released all PCM data (%lld)"), OldNumOfPCMData);
-		ExecuteResult(true);
-		return;
-	}
-
-	const int64 NewPCMDataSize = (PCMBufferInfo->PCMNumOfFrames - GetNumOfPlayedFrames_Internal()) * NumChannels;
-	float* NewPCMDataPtr = static_cast<float*>(FMemory::Malloc(NewPCMDataSize * sizeof(float)));
-	if (!NewPCMDataPtr)
-	{
-		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Failed to allocate new memory to free already played audio data"));
-		ExecuteResult(false);
-		return;
-	}
-
-	// PCM data offset to retrieve remaining data for playback
-	const int64 PCMDataOffset = GetNumOfPlayedFrames_Internal() * NumChannels;
-
-	FMemory::Memcpy(NewPCMDataPtr, PCMBufferInfo->PCMData.GetView().GetData() + PCMDataOffset, NewPCMDataSize * sizeof(float));
-	PCMBufferInfo->PCMData = FRuntimeBulkDataBuffer<float>(NewPCMDataPtr, NewPCMDataSize);
-
-	// Decreasing the amount of PCM frames
-	PCMBufferInfo->PCMNumOfFrames -= GetNumOfPlayedFrames_Internal();
-
-	// Decreasing duration and increasing duration offset
-	{
-		const float DurationOffsetToReduce = GetPlaybackTime_Internal();
-		Duration -= DurationOffsetToReduce;
-		DurationOffset += DurationOffsetToReduce;
-	}
-
-	PlayedNumOfFrames = 0;
-
-	UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully released %lld number of PCM data"), static_cast<int64>(OldNumOfPCMData - PCMBufferInfo->PCMData.GetView().Num()));
-	ExecuteResult(true);
-}
-
 void UImportedSoundWave::SetLooping(bool bLoop)
 {
 	bLooping = bLoop;
@@ -577,7 +503,7 @@ void UImportedSoundWave::SetPitch(float InPitch)
 bool UImportedSoundWave::RewindPlaybackTime(float PlaybackTime)
 {
 	FRAIScopeLock Lock(&*DataGuard);
-	return RewindPlaybackTime_Internal(PlaybackTime - GetDurationOffset_Internal());
+	return RewindPlaybackTime_Internal(PlaybackTime);
 }
 
 bool UImportedSoundWave::RewindPlaybackTime_Internal(float PlaybackTime)
@@ -589,6 +515,46 @@ bool UImportedSoundWave::RewindPlaybackTime_Internal(float PlaybackTime)
 	}
 
 	return SetNumOfPlayedFrames_Internal(PlaybackTime * SampleRate);
+}
+
+bool UImportedSoundWave::SetInitialDesiredSampleRate(int32 DesiredSampleRate)
+{
+	if (PCMBufferInfo->PCMData.GetView().Num() > 0)
+	{
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to set the initial desired sample rate for the imported sound wave '%s' to '%d' because the PCM data has already been populated"), *GetName(), DesiredSampleRate);
+		return false;
+	}
+
+	if (DesiredSampleRate <= 0)
+	{
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to set the initial desired sample rate for the imported sound wave '%s' to '%d' because the sample rate must be greater than zero"), *GetName(), DesiredSampleRate);
+		return false;
+	}
+
+	InitialDesiredSampleRate = DesiredSampleRate;
+	SampleRate = DesiredSampleRate;
+	UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully set the initial desired sample rate for the imported sound wave '%s' to '%d'"), *GetName(), DesiredSampleRate);
+	return true;
+}
+
+bool UImportedSoundWave::SetInitialDesiredNumOfChannels(int32 DesiredNumOfChannels)
+{
+	if (PCMBufferInfo->PCMData.GetView().Num() > 0)
+	{
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to set the initial desired number of channels for the imported sound wave '%s' to '%d' because the PCM data has already been populated"), *GetName(), DesiredNumOfChannels);
+		return false;
+	}
+
+	if (DesiredNumOfChannels <= 0)
+	{
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to set the initial desired number of channels for the imported sound wave '%s' to '%d' because the number of channels must be greater than zero"), *GetName(), DesiredNumOfChannels);
+		return false;
+	}
+
+	InitialDesiredNumOfChannels = DesiredNumOfChannels;
+	NumChannels = DesiredNumOfChannels;
+	UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully set the initial desired number of channels for the imported sound wave '%s' to '%d'"), *GetName(), DesiredNumOfChannels);
+	return true;
 }
 
 bool UImportedSoundWave::ResampleSoundWave(int32 NewSampleRate)
@@ -659,6 +625,73 @@ bool UImportedSoundWave::MixSoundWaveChannels(int32 NewNumOfChannels)
 	return true;
 }
 
+void UImportedSoundWave::StopPlayback(const UObject* WorldContextObject, const FOnStopPlaybackResult& Result)
+{
+	StopPlayback(WorldContextObject, FOnStopPlaybackResultNative::CreateWeakLambda(this, [Result](bool bSucceeded)
+	{
+		Result.ExecuteIfBound(bSucceeded);
+	}));
+}
+
+void UImportedSoundWave::StopPlayback(const UObject* WorldContextObject, const FOnStopPlaybackResultNative& Result)
+{
+	if (!IsInAudioThread())
+	{
+		FAudioThread::RunCommandOnAudioThread( [WeakThis = MakeWeakObjectPtr(this), WorldContextObject, Result]()
+		{
+			WeakThis->StopPlayback(WorldContextObject, Result);
+		});
+		return;
+	}
+
+	auto ExecuteResult = [Result](bool bSucceeded)
+	{
+		AsyncTask(ENamedThreads::GameThread, [Result, bSucceeded]()
+		{
+			Result.ExecuteIfBound(bSucceeded);
+		});
+	};
+
+	if (!GEngine)
+	{
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to stop the playback of the sound wave '%s' because GEngine is invalid"), *GetName());
+		ExecuteResult(false);
+		return;
+	}
+
+	UWorld* ThisWorld = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	if (!ThisWorld)
+	{
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to stop the playback of the sound wave '%s' because the world context object is invalid"), *GetName());
+		ExecuteResult(false);
+		return;
+	}
+
+#if UE_VERSION_OLDER_THAN(4, 25, 0)
+	if (FAudioDevice* AudioDevice = ThisWorld->GetAudioDevice())
+#else
+	if (FAudioDeviceHandle AudioDevice = ThisWorld->GetAudioDevice())
+#endif
+	{
+		const TArray<FActiveSound*>& ActiveSounds = AudioDevice->GetActiveSounds();
+		for (FActiveSound* ActiveSoundPtr : ActiveSounds)
+		{
+			if (ActiveSoundPtr->GetSound() == this && ActiveSoundPtr->IsPlayingAudio())
+			{
+				UE_LOG(LogRuntimeAudioImporter, Warning, TEXT("Stopping the active sound '%s' playing the sound wave '%s'"), *ActiveSoundPtr->GetOwnerName(), *GetName());
+				AudioDevice->StopActiveSound(ActiveSoundPtr);
+
+				// Only one sound wave can be played at a time, so we can stop the loop here
+				ExecuteResult(true);
+				return;
+			}
+		}
+	}
+
+	UE_LOG(LogRuntimeAudioImporter, Warning, TEXT("The sound wave '%s' is not playing"), *GetName());
+	ExecuteResult(true);
+}
+
 bool UImportedSoundWave::SetNumOfPlayedFrames(uint32 NumOfFrames)
 {
 	FRAIScopeLock Lock(&*DataGuard);
@@ -694,7 +727,7 @@ uint32 UImportedSoundWave::GetNumOfPlayedFrames_Internal() const
 float UImportedSoundWave::GetPlaybackTime() const
 {
 	FRAIScopeLock Lock(&*DataGuard);
-	return GetPlaybackTime_Internal() + GetDurationOffset_Internal();
+	return GetPlaybackTime_Internal();
 }
 
 float UImportedSoundWave::GetPlaybackTime_Internal() const
@@ -710,7 +743,7 @@ float UImportedSoundWave::GetPlaybackTime_Internal() const
 float UImportedSoundWave::GetDurationConst() const
 {
 	FRAIScopeLock Lock(&*DataGuard);
-	return GetDurationConst_Internal() + GetDurationOffset_Internal();
+	return GetDurationConst_Internal();
 }
 
 float UImportedSoundWave::GetDurationConst_Internal() const
@@ -764,7 +797,7 @@ bool UImportedSoundWave::IsPlaying(const UObject* WorldContextObject) const
 {
 	if (!GEngine)
 	{
-		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to check if the sound wave '%s' is playing because the GEngine is invalid"), *GetName());
+		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to check if the sound wave '%s' is playing because GEngine is invalid"), *GetName());
 		return false;
 	}
 
@@ -792,18 +825,8 @@ bool UImportedSoundWave::IsPlaying(const UObject* WorldContextObject) const
 		}
 	}
 
+	UE_LOG(LogRuntimeAudioImporter, Log, TEXT("The sound wave '%s' is not playing"), *GetName());
 	return false;
-}
-
-float UImportedSoundWave::GetDurationOffset() const
-{
-	FRAIScopeLock Lock(&*DataGuard);
-	return DurationOffset;
-}
-
-float UImportedSoundWave::GetDurationOffset_Internal() const
-{
-	return DurationOffset;
 }
 
 bool UImportedSoundWave::IsPlaybackFinished_Internal() const

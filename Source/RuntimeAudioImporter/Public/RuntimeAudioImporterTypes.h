@@ -82,6 +82,7 @@ enum class ERuntimeAudioFormat : uint8
 	Flac UMETA(DisplayName = "flac"),
 	OggVorbis UMETA(DisplayName = "ogg vorbis"),
 	Bink UMETA(DisplayName = "bink"),
+	Custom UMETA(DisplayName = "custom"),
 	Invalid UMETA(DisplayName = "invalid", Hidden)
 };
 
@@ -98,6 +99,41 @@ enum class ERuntimeRAWAudioFormat : uint8
 	Float32 UMETA(DisplayName = "Floating point 32-bit")
 };
 
+/** Possible VAD (Voice Activity Detection) modes */
+UENUM(BlueprintType, Category = "Runtime Audio Importer")
+enum class ERuntimeVADMode : uint8
+{
+	Quality UMETA(ToolTip = "High quality, less restrictive in reporting speech"),
+	LowBitrate UMETA(ToolTip = "Low bitrate, more restrictive in reporting speech"),
+	Aggressive UMETA(ToolTip = "Aggressive, restrictive in reporting speech"),
+	VeryAggressive UMETA(ToolTip = "Very aggressive, extremely restrictive in reporting speech")
+};
+
+namespace VoiceActivityDetector
+{
+	/**
+	 * Converts VAD mode to an integer suitable for the VAD library (libfvad)
+	 * @param Mode VAD mode
+	 * @return Integer representation of the VAD mode
+	 */
+	inline int32 GetVADModeInt(ERuntimeVADMode Mode)
+	{
+		switch (Mode)
+		{
+		case ERuntimeVADMode::Quality:
+			return 0;
+		case ERuntimeVADMode::LowBitrate:
+			return 1;
+		case ERuntimeVADMode::Aggressive:
+			return 2;
+		case ERuntimeVADMode::VeryAggressive:
+			return 3;
+		default:
+			return -1;
+		}
+	}
+}
+
 /**
  * An alternative to FBulkDataBuffer with consistent data types
  */
@@ -113,6 +149,94 @@ public:
 
 	FRuntimeBulkDataBuffer() = default;
 
+	/**
+	 * Reserve (pre-allocate) memory for the buffer
+	 * This function can only be called if there's no data allocated
+	 * 
+	 * @param NewCapacity New capacity to reserve
+	 * @return True if the memory was successfully reserved, false otherwise
+	 */
+	bool Reserve(int64 NewCapacity)
+	{
+		// Reserve function can only be called if there's no data allocated
+		if (View.GetData() != nullptr || NewCapacity <= 0)
+		{
+			UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Reserve function can't be called if there's data allocated or NewCapacity is <= 0 (current capacity: %lld, new capacity: %lld)"), ReservedCapacity, NewCapacity);
+			return false;
+		}
+
+		DataType* NewBuffer = static_cast<DataType*>(FMemory::Malloc(NewCapacity * sizeof(DataType)));
+		if (!NewBuffer)
+		{
+			UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Failed to allocate buffer to reserve memory (new capacity: %lld, %lld bytes)"), NewCapacity, NewCapacity * sizeof(DataType));
+			return false;
+		}
+
+		ReservedCapacity = NewCapacity;
+		View = ViewType(NewBuffer, 0);
+		UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Reserving memory for buffer (new capacity: %lld, %lld bytes)"), NewCapacity, NewCapacity * sizeof(DataType));
+
+		return true;
+	}
+
+	void Append(const FRuntimeBulkDataBuffer<DataType>& Other)
+	{
+		Append(Other.GetView().GetData(), Other.GetView().Num());
+	}
+
+	void Append(FRuntimeBulkDataBuffer<DataType>&& Other)
+	{
+		Append(Other.GetView().GetData(), Other.GetView().Num());
+		Other.Empty();
+	}
+
+	/**
+	 * Append data to the buffer from the given buffer
+	 * Takes the reserved capacity into account
+	 * 
+	 * @param InBuffer Buffer to append data from
+	 * @param InNumberOfElements Number of elements to append
+	 */
+	void Append(const DataType* InBuffer, int64 InNumberOfElements)
+	{
+		if (InNumberOfElements <= 0)
+		{
+			return;
+		}
+
+		// Enough reserved capacity, just memcpy
+		if (ReservedCapacity > 0 && InNumberOfElements <= ReservedCapacity)
+		{
+			FMemory::Memcpy(View.GetData() + View.Num(), InBuffer, InNumberOfElements * sizeof(DataType));
+			View = ViewType(View.GetData(), View.Num() + InNumberOfElements);
+			int64 NewReservedCapacity = ReservedCapacity - InNumberOfElements;
+			NewReservedCapacity = NewReservedCapacity < 0 ? 0 : NewReservedCapacity;
+			UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Appending data to buffer (previous capacity: %lld, new capacity: %lld)"), ReservedCapacity, NewReservedCapacity);
+			ReservedCapacity = NewReservedCapacity;
+		}
+		// Not enough reserved capacity or no reserved capacity, reallocate entire buffer
+		else
+		{
+			int64 NewCapacity = View.Num() + InNumberOfElements;
+			DataType* NewBuffer = static_cast<DataType*>(FMemory::Malloc(NewCapacity * sizeof(DataType)));
+			if (!NewBuffer)
+			{
+				UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Failed to allocate buffer to append data (new capacity: %lld, current capacity: %lld)"), NewCapacity, View.Num());
+				return;
+			}
+
+			if (View.Num() > 0)
+			{
+				FMemory::Memcpy(NewBuffer, View.GetData(), View.Num() * sizeof(DataType));
+			}
+			FMemory::Memcpy(NewBuffer + View.Num(), InBuffer, InNumberOfElements * sizeof(DataType));
+
+			FreeBuffer();
+			View = ViewType(NewBuffer, NewCapacity);
+			UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Reallocating buffer to append data (new capacity: %lld)"), NewCapacity);
+		}
+	}
+
 	FRuntimeBulkDataBuffer(const FRuntimeBulkDataBuffer& Other)
 	{
 		*this = Other;
@@ -122,6 +246,8 @@ public:
 	{
 		View = MoveTemp(Other.View);
 		Other.View = ViewType();
+		ReservedCapacity = Other.ReservedCapacity;
+		Other.ReservedCapacity = 0;
 	}
 
 	FRuntimeBulkDataBuffer(DataType* InBuffer, int64 InNumberOfElements)
@@ -145,6 +271,7 @@ public:
 
 		FMemory::Memcpy(BulkData, Other.GetData(), BulkDataSize * sizeof(DataType));
 		View = ViewType(BulkData, BulkDataSize);
+		ReservedCapacity = 0;
 	}
 
 	~FRuntimeBulkDataBuffer()
@@ -154,16 +281,17 @@ public:
 
 	FRuntimeBulkDataBuffer& operator=(const FRuntimeBulkDataBuffer& Other)
 	{
-		FreeBuffer();
-
 		if (this != &Other)
 		{
-			const int64 BufferSize = Other.View.Num();
+			FreeBuffer();
+
+			const int64 BufferSize = Other.View.Num() + Other.ReservedCapacity;
 
 			DataType* BufferCopy = static_cast<DataType*>(FMemory::Malloc(BufferSize * sizeof(DataType)));
 			FMemory::Memcpy(BufferCopy, Other.View.GetData(), BufferSize * sizeof(DataType));
 
 			View = ViewType(BufferCopy, BufferSize);
+			ReservedCapacity = Other.ReservedCapacity;
 		}
 
 		return *this;
@@ -174,9 +302,10 @@ public:
 		if (this != &Other)
 		{
 			FreeBuffer();
-
-			View = Other.View;
+			View = MoveTemp(Other.View);
 			Other.View = ViewType();
+			ReservedCapacity = Other.ReservedCapacity;
+			Other.ReservedCapacity = 0;
 		}
 
 		return *this;
@@ -191,7 +320,6 @@ public:
 	void Reset(DataType* InBuffer, int64 InNumberOfElements)
 	{
 		FreeBuffer();
-
 #if UE_VERSION_OLDER_THAN(4, 27, 0)
 		check(InNumberOfElements <= TNumericLimits<int32>::Max())
 #endif
@@ -204,17 +332,19 @@ public:
 		return View;
 	}
 
-private:
+protected:
 	void FreeBuffer()
 	{
 		if (View.GetData() != nullptr)
 		{
 			FMemory::Free(View.GetData());
 			View = ViewType();
+			ReservedCapacity = 0;
 		}
 	}
 
 	ViewType View;
+	int64 ReservedCapacity = 0;
 };
 
 /** Basic sound wave data */
@@ -225,8 +355,7 @@ struct FSoundWaveBasicStruct
 	  , SampleRate(0)
 	  , Duration(0)
 	  , AudioFormat(ERuntimeAudioFormat::Invalid)
-	{
-	}
+	{}
 
 	/** Number of channels */
 	uint32 NumOfChannels;
@@ -264,8 +393,7 @@ struct FPCMStruct
 {
 	FPCMStruct()
 		: PCMNumOfFrames(0)
-	{
-	}
+	{}
 
 	/**
 	 * Whether the PCM data appear to be valid or not
@@ -283,7 +411,7 @@ struct FPCMStruct
 	FString ToString() const
 	{
 		return FString::Printf(TEXT("Validity of PCM data in memory: %s, number of PCM frames: %d, PCM data size: %lld"),
-		                       PCMData.GetView().IsValidIndex(0) ? TEXT("Valid") : TEXT("Invalid"), PCMNumOfFrames, static_cast<int64>(PCMData.GetView().Num()));
+			PCMData.GetView().IsValidIndex(0) ? TEXT("Valid") : TEXT("Invalid"), PCMNumOfFrames, static_cast<int64>(PCMData.GetView().Num()));
 	}
 
 	/** 32-bit float PCM data */
@@ -326,21 +454,18 @@ struct FEncodedAudioStruct
 {
 	FEncodedAudioStruct()
 		: AudioFormat(ERuntimeAudioFormat::Invalid)
-	{
-	}
+	{}
 
 	template <typename Allocator>
 	FEncodedAudioStruct(const TArray<uint8, Allocator>& AudioDataArray, ERuntimeAudioFormat AudioFormat)
 		: AudioData(AudioDataArray)
 	  , AudioFormat(AudioFormat)
-	{
-	}
-	
+	{}
+
 	FEncodedAudioStruct(FRuntimeBulkDataBuffer<uint8> AudioDataBulk, ERuntimeAudioFormat AudioFormat)
 		: AudioData(MoveTemp(AudioDataBulk))
 	  , AudioFormat(AudioFormat)
-	{
-	}
+	{}
 
 	/**
 	 * Converts Encoded Audio Struct to a readable format
@@ -350,8 +475,8 @@ struct FEncodedAudioStruct
 	FString ToString() const
 	{
 		return FString::Printf(TEXT("Validity of audio data in memory: %s, audio data size: %lld, audio format: %s"),
-		                       AudioData.GetView().IsValidIndex(0) ? TEXT("Valid") : TEXT("Invalid"), static_cast<int64>(AudioData.GetView().Num()),
-		                       *UEnum::GetValueAsName(AudioFormat).ToString());
+			AudioData.GetView().IsValidIndex(0) ? TEXT("Valid") : TEXT("Invalid"), static_cast<int64>(AudioData.GetView().Num()),
+			*UEnum::GetValueAsName(AudioFormat).ToString());
 	}
 
 	/** Audio data */
@@ -372,8 +497,7 @@ struct FCompressedSoundWaveInfo
 	  , bLooping(false)
 	  , Volume(1.f)
 	  , Pitch(1.f)
-	{
-	}
+	{}
 
 	/** Sound group */
 	UPROPERTY(BlueprintReadWrite, Category = "Runtime Audio Importer")
@@ -400,8 +524,7 @@ struct FEditableSubtitleCue
 
 	FEditableSubtitleCue()
 		: Time(0)
-	{
-	}
+	{}
 
 	/** The text to appear in the subtitle */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Runtime Audio Importer")
@@ -424,8 +547,7 @@ struct FRuntimeAudioInputDeviceInfo
 	  , InputChannels(0)
 	  , PreferredSampleRate(0)
 	  , bSupportsHardwareAEC(true)
-	{
-	}
+	{}
 
 #if WITH_RUNTIMEAUDIOIMPORTER_CAPTURE_SUPPORT
 	FRuntimeAudioInputDeviceInfo(const Audio::FCaptureDeviceInfo& DeviceInfo)
@@ -436,8 +558,7 @@ struct FRuntimeAudioInputDeviceInfo
 	  , InputChannels(DeviceInfo.InputChannels)
 	  , PreferredSampleRate(DeviceInfo.PreferredSampleRate)
 	  , bSupportsHardwareAEC(DeviceInfo.bSupportsHardwareAEC)
-	{
-	}
+	{}
 #endif
 
 	/** The name of the audio device */
@@ -473,8 +594,7 @@ struct FRuntimeAudioHeaderInfo
 	  , SampleRate(0)
 	  , PCMDataSize(0)
 	  , AudioFormat(ERuntimeAudioFormat::Invalid)
-	{
-	}
+	{}
 
 	/**
 	 * Converts Audio Header Info to a readable format
@@ -484,7 +604,7 @@ struct FRuntimeAudioHeaderInfo
 	FString ToString() const
 	{
 		return FString::Printf(TEXT("Duration: %f, number of channels: %d, sample rate: %d, PCM data size: %lld, audio format: %s"),
-							   Duration, NumOfChannels, SampleRate, PCMDataSize, *UEnum::GetValueAsName(AudioFormat).ToString());
+			Duration, NumOfChannels, SampleRate, PCMDataSize, *UEnum::GetValueAsName(AudioFormat).ToString());
 	}
 
 	/** Audio duration, sec */
@@ -517,8 +637,7 @@ struct FRuntimeAudioExportOverrideOptions
 	FRuntimeAudioExportOverrideOptions()
 		: NumOfChannels(-1)
 	  , SampleRate(-1)
-	{
-	}
+	{}
 
 	bool IsOverriden() const
 	{
@@ -538,7 +657,7 @@ struct FRuntimeAudioExportOverrideOptions
 	/** Number of channels. Set to -1 to retrieve from source. Mixing if count differs from source */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Runtime Audio Importer")
 	int32 NumOfChannels;
-    
+
 	/** Audio sampling rate (samples per second, sampling frequency). Set to -1 to retrieve from source. Resampling if count differs from source */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Runtime Audio Importer")
 	int32 SampleRate;

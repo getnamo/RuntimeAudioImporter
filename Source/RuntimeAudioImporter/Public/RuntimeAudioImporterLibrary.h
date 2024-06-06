@@ -137,6 +137,7 @@ public:
 
 	/**
 	 * Converts a regular SoundWave to an inherited sound wave of type ImportedSoundWave used in RuntimeAudioImporter
+	 * Experimental feature, use with caution
 	 *
 	 * @param SoundWave The regular USoundWave to convert
 	 * @param ImportedSoundWaveClass The subclass of UImportedSoundWave to create and convert to
@@ -147,6 +148,7 @@ public:
 
 	/**
 	 * Converts a regular SoundWave to an inherited sound wave of type ImportedSoundWave used in RuntimeAudioImporter. Suitable for use in C++
+	 * Experimental feature, use with caution
 	 *
 	 * @param SoundWave The regular USoundWave to convert
 	 * @param ImportedSoundWaveClass The subclass of UImportedSoundWave to create and convert to
@@ -188,6 +190,16 @@ public:
 	 * @param DecodedAudioInfo Decoded audio data
 	 */
 	void ImportAudioFromDecodedInfo(FDecodedAudioStruct&& DecodedAudioInfo);
+
+	/**
+	 * Resample and mix channels in decoded audio info
+	 * 
+	 * @param DecodedAudioInfo Decoded audio data
+	 * @param NewSampleRate New sample rate
+	 * @param NewNumOfChannels New number of channels
+	 * @return True if the resampling and mixing was successful
+	 */
+	static bool ResampleAndMixChannelsInDecodedInfo(FDecodedAudioStruct& DecodedAudioInfo, uint32 NewSampleRate, uint32 NewNumOfChannels);
 
 protected:
 	/**

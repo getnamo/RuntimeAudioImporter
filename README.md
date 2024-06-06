@@ -1,3 +1,7 @@
+<a href="https://github.com/gtreshchev/RuntimeAudioImporter/blob/main/LICENSE">![License](https://img.shields.io/badge/license-MIT-brightgreen.svg)</a>
+<a href="https://georgy.dev/discord">![Discord](https://img.shields.io/discord/1055168498919284786.svg?label=Discord&logo=discord&color=7289DA&labelColor=2C2F33)</a>
+<a href="https://www.unrealengine.com/">![Unreal Engine](https://img.shields.io/badge/Unreal-4.24%2B-dea309)</a>
+
 <br/>
 <p align="center">
   <a href="https://github.com/gtreshchev/RuntimeAudioImporter">
@@ -17,7 +21,7 @@
     .
     <a href="https://github.com/gtreshchev/RuntimeAudioImporter/releases">Releases</a>
     <br/>
-    <a href="https://discord.gg/s3e53uByCq">Discord support chat</a>
+    <a href="https://georgy.dev/discord">Discord support chat</a>
   </p>
 
 ## Features
@@ -29,17 +33,20 @@
 - Automatic detection of audio format
 - Audio streaming functionality
 - Audio capturing from input devices (eg microphone)
+- Voice Activity Detection (VAD)
 - Exporting a sound wave to a separate file
 - Pre-imported sound assets
-- No any static libraries and external dependencies
-- Support for all available devices (Android, iOS, Windows, Mac, Linux, etc)
+- No static libraries or external dependencies
+- Cross-platform compatibility (Windows, Mac, Linux, Android, iOS, etc)
 
 ## Additional information
 
-The in-memory audio transcoding operation is done on [dr_libs](https://github.com/mackron/dr_libs).
+MP3, WAV, and FLAC audio transcoding operations are powered by [dr_libs](https://github.com/mackron/dr_libs) and [minimp3](https://github.com/lieff/minimp3).
+
+VAD (Voice Activity Detection) is powered by [libfvad](https://github.com/dpirch/libfvad).
 
 ## Legal info
 
 Unreal® is a trademark or registered trademark of Epic Games, Inc. in the United States of America and elsewhere.
 
-Unreal® Engine, Copyright 1998 – 2023, Epic Games, Inc. All rights reserved.
+Unreal® Engine, Copyright 1998 – 2024, Epic Games, Inc. All rights reserved.

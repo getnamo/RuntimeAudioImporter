@@ -8,6 +8,8 @@
 #include "Containers/Queue.h"
 #include "StreamingSoundWave.generated.h"
 
+class URuntimeVoiceActivityDetector;
+
 /** Static delegate broadcast the result of audio data pre-allocation */
 DECLARE_DELEGATE_OneParam(FOnPreAllocateAudioDataResultNative, bool);
 
@@ -76,13 +78,41 @@ public:
 	 * Set whether the sound should stop after playback is complete or not (play "blank sound"). False by default
 	 * Setting it to True also makes the sound wave eligible for garbage collection after it has finished playing
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Imported Streaming Sound Wave|Import")
+	UFUNCTION(BlueprintCallable, Category = "Streaming Sound Wave|Import")
 	void SetStopSoundOnPlaybackFinish(bool bStop);
+
+	/**
+	 * Toggles whether the audio capture should be filtered by VAD (Voice Activity Detection)
+	 * If VAD is enabled, only audio data with voice activity will be captured
+	 */
+	UFUNCTION(BlueprintCallable, meta = (Keywords = "Voice Activity Detector Enable Toggle"), Category = "Streaming Sound Wave|VAD")
+	bool ToggleVAD(bool bVAD);
+
+	/**
+	 * Reinitializes a VAD (Voice Activity Detector) instance, clearing all state and resetting mode and sample rate to defaults
+	 *
+	 * @note This function can be called only if VAD is enabled (see ToggleVAD)
+	 * @return Whether VAD is enabled or not
+	 */
+	UFUNCTION(BlueprintCallable, meta = (Keywords = "Voice Activity Detector Reset"), Category = "Streaming Sound Wave|VAD")
+	bool ResetVAD();
+
+	/**
+	 * Changes the operating ("aggressiveness") mode of a VAD (Voice Activity Detector) instance
+	 * A more aggressive (higher mode) VAD is more restrictive in reporting speech
+	 * In other words, the probability of detecting voice activity increases with a higher mode
+	 * However, this also increases the rate of missed detections
+	 * VeryAggressive is used by default
+	 *
+	 * @note This function can be called only if VAD is enabled (see ToggleVAD)
+	 * @param Mode The VAD mode to set
+	 * @return Whether the VAD mode was successfully set
+	 */
+	UFUNCTION(BlueprintCallable, meta = (DisplayName = "Set VAD Mode", Keywords = "Voice Activity Detector Mode"), Category = "Streaming Sound Wave|VAD")
+	bool SetVADMode(ERuntimeVADMode Mode);
 
 	//~ Begin UImportedSoundWave Interface
 	virtual void PopulateAudioDataFromDecodedInfo(FDecodedAudioStruct&& DecodedAudioInfo) override;
-	virtual void ReleaseMemory() override;
-	virtual void ReleasePlayedAudioData(const FOnPlayedAudioDataReleaseResultNative& Result) override;
 	//~ End UImportedSoundWave Interface
 
 protected:
@@ -92,10 +122,7 @@ protected:
 	/** Queue of audio data to be appended. Needed to maintain the consecutive order of audio data when appending */
 	TQueue<FAudioTaskDelegate> AppendAudioTaskQueue;
 
-private:
-	/** Whether the initial audio data is filled in or not */
-	bool bFilledInitialAudioData;
-
-	/** Number of pre-allocated byte data for PCM */
-	int64 NumOfPreAllocatedByteData;
+	/** The VAD (Voice Activity Detector) instance. Is valid only if VAD is enabled (see ToggleVAD) */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Streaming Sound Wave|VAD")
+	URuntimeVoiceActivityDetector* VADInstance;
 };

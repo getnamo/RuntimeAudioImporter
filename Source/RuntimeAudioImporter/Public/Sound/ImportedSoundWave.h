@@ -4,6 +4,7 @@
 
 #include "RuntimeAudioImporterTypes.h"
 #include "Sound/SoundWaveProcedural.h"
+#include "Misc/Optional.h"
 #include "ImportedSoundWave.generated.h"
 
 class UImportedSoundWave;
@@ -53,6 +54,12 @@ DECLARE_DELEGATE_TwoParams(FOnDuplicateSoundWaveNative, bool, UImportedSoundWave
 
 /** Dynamic delegate broadcast when a sound wave is duplicated */
 DECLARE_DYNAMIC_DELEGATE_TwoParams(FOnDuplicateSoundWave, bool, bSucceeded, UImportedSoundWave*, DuplicatedSoundWave);
+
+/** Static delegate broadcast the result of stopping the sound wave playback */
+DECLARE_DELEGATE_OneParam(FOnStopPlaybackResultNative, bool);
+
+/** Dynamic delegate broadcast the result of stopping the sound wave playback */
+DECLARE_DYNAMIC_DELEGATE_OneParam(FOnStopPlaybackResult, bool, bSucceeded);
 
 
 /**
@@ -139,24 +146,6 @@ public:
 	virtual void ReleaseMemory();
 
 	/**
-	 * Remove previously played audio data. Adds a duration offset from the removed audio data
-	 * This re-allocates all audio data memory, so should not be called too frequently
-	 * 
-	 * @param Result Delegate broadcasting the result
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Miscellaneous")
-	void ReleasePlayedAudioData(const FOnPlayedAudioDataReleaseResult& Result);
-
-	/**
-	 * Remove previously played audio data. Adds a duration offset from the removed audio data
-	 * This re-allocates all audio data memory, so should not be called too frequently
-	 * Suitable for use in C++
-	 *
-	 * @param Result Delegate broadcasting the result
-	 */
-	virtual void ReleasePlayedAudioData(const FOnPlayedAudioDataReleaseResultNative& Result);
-
-	/**
 	 * Set whether the sound should loop or not
 	 *
 	 * @param bLoop Whether the sound should loop or not
@@ -191,7 +180,6 @@ public:
 	/**
 	 * Rewind the sound for the specified time
 	 *
-	 * @note This adds a duration offset (relevant if ReleasePlayedAudioData was used)
 	 * @param PlaybackTime How long to rewind the sound
 	 * @return Whether the sound was rewound or not
 	 */
@@ -201,9 +189,32 @@ public:
 	/**
 	 * Thread-unsafe equivalent of RewindPlaybackTime
 	 * Should only be used if DataGuard is locked
-	 * @note This does not add a duration offset
 	 */
 	bool RewindPlaybackTime_Internal(float PlaybackTime);
+
+	/**
+	 * Set the initial desired sample rate of the sound wave
+	 * The sound wave PCM data will always contain this sample rate after the sound wave is populated with audio data
+	 *
+	 * @note This should be called before the sound wave is populated with any audio data
+	 * @param DesiredSampleRate The initial desired sample rate
+	 * @return Whether the initial desired sample rate was set or not
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Main")
+	bool SetInitialDesiredSampleRate(int32 DesiredSampleRate);
+
+	/**
+	 * Set the initial desired number of channels of the sound wave
+	 * The sound wave PCM data will always contain this number of channels after the sound wave is populated with audio data
+	 *
+	 * @note This should be called before the sound wave is populated with any audio data
+	 * @param DesiredNumOfChannels The initial desired number of channels
+	 * @return Whether the initial desired number of channels was set or not
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Main")
+	bool SetInitialDesiredNumOfChannels(int32 DesiredNumOfChannels);
+
+public:
 
 	// TODO: Make this async
 	/**
@@ -226,6 +237,25 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Main")
 	bool MixSoundWaveChannels(int32 NewNumOfChannels);
+
+	/**
+	 * Stop the sound wave playback
+	 * 
+	 * @note It is recommended to stop the sound wave playback using external means (e.g., by calling Stop on the audio component) and to use this function only if external means are not available
+	 * @warning This function does not work for playback from MetaSounds
+	 * @return Whether the sound wave was stopped or not
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Main", meta = (WorldContext = "WorldContextObject"))
+	void StopPlayback(const UObject* WorldContextObject, const FOnStopPlaybackResult& Result);
+
+	/**
+	 * Stop the sound wave playback. Suitable for use in C++
+	 * 
+	 * @note It is recommended to stop the sound wave playback using external means (e.g., by calling Stop on the audio component) and to use this function only if external means are not available
+	 * @warning This function does not work for playback from MetaSounds
+	 * @return Whether the sound wave was stopped or not
+	 */
+	void StopPlayback(const UObject* WorldContextObject, const FOnStopPlaybackResultNative& Result);
 
 	/**
 	 * Change the number of frames played back. Used to rewind the sound
@@ -256,7 +286,6 @@ public:
 
 	/**
 	 * Get the current sound wave playback time, in seconds
-	 * @note This adds a duration offset (relevant if ReleasePlayedAudioData was used)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Info")
 	float GetPlaybackTime() const;
@@ -264,20 +293,17 @@ public:
 	/**
 	 * Thread-unsafe equivalent of GetPlaybackTime
 	 * Should only be used if DataGuard is locked
-	 * @note This does not add a duration offset
 	 */
 	float GetPlaybackTime_Internal() const;
 
 	/**
 	 * Constant alternative for getting the length of the sound wave, in seconds
-	 * @note This adds a duration offset (relevant if ReleasePlayedAudioData was used)
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Info", meta = (DisplayName = "Get Duration"))
 	float GetDurationConst() const;
 
 	/**
 	 * Get the length of the sound wave, in seconds
-	 * @note This adds a duration offset (relevant if ReleasePlayedAudioData was used)
 	 */
 	virtual float GetDuration()
 #if UE_VERSION_OLDER_THAN(5, 0, 0)
@@ -289,7 +315,6 @@ public:
 	/**
 	 * Thread-unsafe equivalent of GetDurationConst
 	 * Should only be used if DataGuard is locked
-	 * @note This does not add a duration offset
 	 */
 	float GetDurationConst_Internal() const;
 
@@ -330,19 +355,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Info", meta = (WorldContext = "WorldContextObject"))
 	bool IsPlaying(const UObject* WorldContextObject) const;
-
-	/**
-	 * Get the duration offset if some played back audio data was removed during playback (eg in ReleasePlayedAudioData)
-	 * The sound wave starts playing from this time as from the very beginning
-	 */
-	UFUNCTION(BlueprintCallable, Category = "Imported Sound Wave|Info")
-	float GetDurationOffset() const;
-
-	/**
-	 * Thread-unsafe equivalent of GetDurationOffset
-	 * Should only be used if DataGuard is locked
-	 */
-	float GetDurationOffset_Internal() const;
 
 	/**
 	 * Thread-unsafe equivalent of IsPlaybackFinished
@@ -431,9 +443,6 @@ public:
 	mutable TSharedPtr<FCriticalSection> DataGuard;
 
 protected:
-	/** Duration offset, needed to track the clearing of part of the audio data of the sound wave during playback (see ReleasePlayedAudioData) */
-	float DurationOffset;
-
 	/** Bool to control the behaviour of the OnAudioPlaybackFinished delegate */
 	bool PlaybackFinishedBroadcast;
 
@@ -448,4 +457,10 @@ protected:
 
 	/** Audio format of the audio imported into the sound wave */
 	ERuntimeAudioFormat ImportedAudioFormat;
+
+	/** Initial desired sample rate of the sound wave (see SetInitialDesiredSampleRate) */
+	TOptional<uint32> InitialDesiredSampleRate;
+
+	/** Initial desired number of channels of the sound wave (see SetInitialDesiredNumChannels) */
+	TOptional<uint32> InitialDesiredNumOfChannels;
 };

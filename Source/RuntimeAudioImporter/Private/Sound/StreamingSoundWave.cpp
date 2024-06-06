@@ -7,6 +7,7 @@
 
 #include "Async/Async.h"
 #include "SampleBuffer.h"
+#include "VAD/RuntimeVoiceActivityDetector.h"
 #include "UObject/WeakObjectPtrTemplates.h"
 
 UStreamingSoundWave::UStreamingSoundWave(const FObjectInitializer& ObjectInitializer)
@@ -27,9 +28,32 @@ UStreamingSoundWave::UStreamingSoundWave(const FObjectInitializer& ObjectInitial
 		SetSampleRate(44100);
 		NumChannels = 2;
 	}
+}
 
-	bFilledInitialAudioData = false;
-	NumOfPreAllocatedByteData = 0;
+bool UStreamingSoundWave::ToggleVAD(bool bVAD)
+{
+	VADInstance = bVAD ? NewObject<URuntimeVoiceActivityDetector>() : nullptr;
+	return true;
+}
+
+bool UStreamingSoundWave::ResetVAD()
+{
+	if (VADInstance)
+	{
+		return VADInstance->ResetVAD();
+	}
+	UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to reset VAD as the VAD instance is not valid"));
+	return false;
+}
+
+bool UStreamingSoundWave::SetVADMode(ERuntimeVADMode Mode)
+{
+	if (VADInstance)
+	{
+		return VADInstance->SetVADMode(Mode);
+	}
+	UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to set VAD mode as the VAD instance is not valid"));
+	return false;
 }
 
 void UStreamingSoundWave::PopulateAudioDataFromDecodedInfo(FDecodedAudioStruct&& DecodedAudioInfo)
@@ -42,73 +66,31 @@ void UStreamingSoundWave::PopulateAudioDataFromDecodedInfo(FDecodedAudioStruct&&
 			return;
 		}
 
+		// Whether the audio data has been populated with PCM buffer
+		const bool bHasPreviouslyPopulatedRealPCMData = PCMBufferInfo->PCMData.GetView().Num() > 0;
+
+		// Make sure the sample rate and the number of channels match the previously populated audio data
+		if (bHasPreviouslyPopulatedRealPCMData)
+		{
+			URuntimeAudioImporterLibrary::ResampleAndMixChannelsInDecodedInfo(DecodedAudioInfo, SampleRate, NumChannels);
+		}
+
+		// If the sound wave has not yet been filled in with audio data and the initial desired sample rate and the number of channels are set, resample and mix the channels
+		else if (InitialDesiredSampleRate.IsSet() || InitialDesiredNumOfChannels.IsSet())
+		{
+			URuntimeAudioImporterLibrary::ResampleAndMixChannelsInDecodedInfo(DecodedAudioInfo,
+				InitialDesiredSampleRate.IsSet() ? InitialDesiredSampleRate.GetValue() : DecodedAudioInfo.SoundWaveBasicInfo.SampleRate,
+				InitialDesiredNumOfChannels.IsSet() ? InitialDesiredNumOfChannels.GetValue() : DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels);
+		}
+
 		// Update the initial audio data if it hasn't already been filled in
-		if (!bFilledInitialAudioData)
+		if (!bHasPreviouslyPopulatedRealPCMData)
 		{
 			SetSampleRate(DecodedAudioInfo.SoundWaveBasicInfo.SampleRate);
 			NumChannels = DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels;
-			bFilledInitialAudioData = true;
 		}
 
-		// Check if the number of channels and the sampling rate of the sound wave and the input audio data match
-		if (SampleRate != DecodedAudioInfo.SoundWaveBasicInfo.SampleRate || NumChannels != DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels)
-		{
-			Audio::FAlignedFloatBuffer WaveData(DecodedAudioInfo.PCMInfo.PCMData.GetView().GetData(), DecodedAudioInfo.PCMInfo.PCMData.GetView().Num());
-
-			// Resampling if needed
-			if (SampleRate != DecodedAudioInfo.SoundWaveBasicInfo.SampleRate)
-			{
-				Audio::FAlignedFloatBuffer ResamplerOutputData;
-				if (!FRAW_RuntimeCodec::ResampleRAWData(WaveData, GetNumOfChannels(), GetSampleRate(), DecodedAudioInfo.SoundWaveBasicInfo.SampleRate, ResamplerOutputData))
-				{
-					UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to resample audio data to the sound wave's sample rate. Resampling failed"));
-					return;
-				}
-				WaveData = MoveTemp(ResamplerOutputData);
-			}
-
-			// Mixing the channels if needed
-			if (NumChannels != DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels)
-			{
-				Audio::FAlignedFloatBuffer WaveDataTemp;
-				if (!FRAW_RuntimeCodec::MixChannelsRAWData(WaveData, DecodedAudioInfo.SoundWaveBasicInfo.SampleRate, GetNumOfChannels(), DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels, WaveDataTemp))
-				{
-					UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Unable to mix audio data to the sound wave's number of channels. Mixing failed"));
-					return;
-				}
-				WaveData = MoveTemp(WaveDataTemp);
-			}
-
-			DecodedAudioInfo.PCMInfo.PCMData = FRuntimeBulkDataBuffer<float>(WaveData);
-		}
-
-		// Do not reallocate the entire PCM buffer if it has free space to fill in
-		if (static_cast<uint64>(NumOfPreAllocatedByteData) >= DecodedAudioInfo.PCMInfo.PCMData.GetView().Num() * sizeof(float))
-		{
-			// This should be changed somehow to work with the new calculations
-			FMemory::Memcpy(reinterpret_cast<uint8*>(PCMBufferInfo->PCMData.GetView().GetData()) + ((PCMBufferInfo->PCMData.GetView().Num() * sizeof(float)) - NumOfPreAllocatedByteData), DecodedAudioInfo.PCMInfo.PCMData.GetView().GetData(), DecodedAudioInfo.PCMInfo.PCMData.GetView().Num() * sizeof(float));
-			NumOfPreAllocatedByteData -= DecodedAudioInfo.PCMInfo.PCMData.GetView().Num() * sizeof(float);
-			NumOfPreAllocatedByteData = NumOfPreAllocatedByteData < 0 ? 0 : NumOfPreAllocatedByteData;
-		}
-		else
-		{
-			const int64 NewPCMDataSize = ((PCMBufferInfo->PCMData.GetView().Num() * sizeof(float)) + (DecodedAudioInfo.PCMInfo.PCMData.GetView().Num() * sizeof(float)) - NumOfPreAllocatedByteData) / sizeof(float);
-			float* NewPCMDataPtr = static_cast<float*>(FMemory::Malloc(NewPCMDataSize * sizeof(float)));
-
-			if (!NewPCMDataPtr)
-			{
-				return;
-			}
-
-			// Adding new PCM data at the end
-			{
-				FMemory::Memcpy(NewPCMDataPtr, PCMBufferInfo->PCMData.GetView().GetData(), (PCMBufferInfo->PCMData.GetView().Num() * sizeof(float)) - NumOfPreAllocatedByteData);
-				FMemory::Memcpy(reinterpret_cast<uint8*>(NewPCMDataPtr) + ((PCMBufferInfo->PCMData.GetView().Num() * sizeof(float)) - NumOfPreAllocatedByteData), DecodedAudioInfo.PCMInfo.PCMData.GetView().GetData(), DecodedAudioInfo.PCMInfo.PCMData.GetView().Num() * sizeof(float));
-			}
-
-			PCMBufferInfo->PCMData = FRuntimeBulkDataBuffer<float>(NewPCMDataPtr, NewPCMDataSize);
-			NumOfPreAllocatedByteData = 0;
-		}
+		PCMBufferInfo->PCMData.Append(DecodedAudioInfo.PCMInfo.PCMData);
 
 		PCMBufferInfo->PCMNumOfFrames += DecodedAudioInfo.PCMInfo.PCMNumOfFrames;
 		Duration += DecodedAudioInfo.SoundWaveBasicInfo.Duration;
@@ -176,7 +158,6 @@ void UStreamingSoundWave::PopulateAudioDataFromDecodedInfo(FDecodedAudioStruct&&
 		AppendAudioTask->ExecuteIfBound();
 	}
 
-	//Getnamo - remove log spam
 	//UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully added audio data to streaming sound wave.\nAdded audio info: %s"), *DecodedAudioInfo.ToString());
 }
 
@@ -246,25 +227,7 @@ void UStreamingSoundWave::PreAllocateAudioData(int64 NumOfBytesToPreAllocate, co
 		});
 	};
 
-	if (PCMBufferInfo->PCMData.GetView().Num() > 0 || NumOfPreAllocatedByteData > 0)
-	{
-		ensureMsgf(false, TEXT("Pre-allocation of PCM data can only be applied if the PCM data has not yet been allocated"));
-		ExecuteResult(false);
-		return;
-	}
-
-	float* NewPCMDataPtr = static_cast<float*>(FMemory::Malloc(NumOfBytesToPreAllocate));
-	if (!NewPCMDataPtr)
-	{
-		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Failed to allocate memory to pre-allocate streaming sound wave audio data with '%lld' number of bytes"), NumOfBytesToPreAllocate);
-		ExecuteResult(false);
-		return;
-	}
-
-	{
-		NumOfPreAllocatedByteData = NumOfBytesToPreAllocate;
-		PCMBufferInfo->PCMData = FRuntimeBulkDataBuffer<float>(NewPCMDataPtr, NumOfBytesToPreAllocate / sizeof(float));
-	}
+	PCMBufferInfo->PCMData.Reserve(NumOfBytesToPreAllocate / sizeof(float));
 
 	UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Successfully pre-allocated '%lld' number of bytes"), NumOfBytesToPreAllocate);
 	ExecuteResult(true);
@@ -389,6 +352,26 @@ void UStreamingSoundWave::AppendAudioDataFromRAW(TArray<uint8> RAWData, ERuntime
 		UE_LOG(LogRuntimeAudioImporter, Error, TEXT("Failed to transcode RAW data to decoded audio info"))
 		return;
 	}
+
+#if WITH_RUNTIMEAUDIOIMPORTER_VAD_SUPPORT
+	// Process VAD if necessary
+	if (VADInstance)
+	{
+		bool bDetected = VADInstance->ProcessVAD(TArray<float>(reinterpret_cast<const float*>(Float32DataPtr), static_cast<int32>(NumOfSamples)),
+#if UE_VERSION_NEWER_THAN(4, 25, 0)
+			InSampleRate
+#else
+			WeakThis->AudioCapture.GetSampleRate()
+#endif
+			, NumOfChannels);
+		if (!bDetected)
+		{
+			UE_LOG(LogRuntimeAudioImporter, Warning, TEXT("VAD detected silence, skipping audio data append"));
+			return;
+		}
+		UE_LOG(LogRuntimeAudioImporter, Log, TEXT("VAD detected voice, appending audio data"));
+	}
+#endif
 
 	FDecodedAudioStruct DecodedAudioInfo;
 	{

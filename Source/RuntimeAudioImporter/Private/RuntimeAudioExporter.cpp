@@ -25,7 +25,8 @@ void URuntimeAudioExporter::ExportSoundWaveToFile(UImportedSoundWave* ImportedSo
 
 void URuntimeAudioExporter::ExportSoundWaveToFile(TWeakObjectPtr<UImportedSoundWave> ImportedSoundWavePtr, const FString& SavePath, ERuntimeAudioFormat AudioFormat, uint8 Quality, const FRuntimeAudioExportOverrideOptions& OverrideOptions, const FOnAudioExportToFileResultNative& Result)
 {
-	AudioFormat = AudioFormat == ERuntimeAudioFormat::Auto ? URuntimeAudioUtilities::GetAudioFormat(SavePath) : AudioFormat;
+	TArray<ERuntimeAudioFormat> AudioFormats = URuntimeAudioUtilities::GetAudioFormats(SavePath);
+	AudioFormat = AudioFormat == ERuntimeAudioFormat::Auto ? (AudioFormats.Num() == 0 ? ERuntimeAudioFormat::Invalid : AudioFormats[0]) : AudioFormat;
 	ExportSoundWaveToBuffer(ImportedSoundWavePtr, AudioFormat, Quality, OverrideOptions, FOnAudioExportToBufferResultNative::CreateLambda([Result, SavePath](bool bSucceeded, const TArray64<uint8>& AudioData)
 	{
 		if (!bSucceeded)
@@ -303,7 +304,7 @@ void URuntimeAudioExporter::ExportSoundWaveToRAWBuffer(TWeakObjectPtr<UImportedS
 		RAWDataFrom = TArray64<uint8>(reinterpret_cast<uint8*>(ImportedSoundWavePtr->GetPCMBuffer().PCMData.GetView().GetData()), ImportedSoundWavePtr->GetPCMBuffer().PCMData.GetView().Num() * sizeof(float));
 	}
 
-	URuntimeAudioTranscoder::TranscodeRAWDataFromBuffer(MoveTemp(RAWDataFrom), ERuntimeRAWAudioFormat::Float32, RAWFormat, FOnRAWDataTranscodeFromBufferResultNative::CreateWeakLambda(ImportedSoundWavePtr.Get(), [Result, ExecuteResult](bool bSucceeded, const TArray64<uint8>& RAWData)
+	URuntimeAudioTranscoder::TranscodeRAWDataFromBuffer(MoveTemp(RAWDataFrom), ERuntimeRAWAudioFormat::Float32, RAWFormat, FOnRAWDataTranscodeFromBufferResultNative::CreateWeakLambda(ImportedSoundWavePtr.Get(), [ExecuteResult](bool bSucceeded, const TArray64<uint8>& RAWData)
 	{
 		ExecuteResult(bSucceeded, RAWData);
 	}));
