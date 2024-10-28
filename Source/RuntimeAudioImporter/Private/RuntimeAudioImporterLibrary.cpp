@@ -479,7 +479,7 @@ bool URuntimeAudioImporterLibrary::ResampleAndMixChannelsInDecodedInfo(FDecodedA
 	
 	if (NewSampleRate == DecodedAudioInfo.SoundWaveBasicInfo.SampleRate && NewNumOfChannels == DecodedAudioInfo.SoundWaveBasicInfo.NumOfChannels)
 	{
-		UE_LOG(LogRuntimeAudioImporter, Log, TEXT("No need to resample or mix audio data"));
+		//UE_LOG(LogRuntimeAudioImporter, Log, TEXT("No need to resample or mix audio data"));
 		return true;
 	}
 	

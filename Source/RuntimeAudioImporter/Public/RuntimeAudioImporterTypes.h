@@ -233,7 +233,7 @@ public:
 
 			FreeBuffer();
 			View = ViewType(NewBuffer, NewCapacity);
-			UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Reallocating buffer to append data (new capacity: %lld)"), NewCapacity);
+			//UE_LOG(LogRuntimeAudioImporter, Log, TEXT("Reallocating buffer to append data (new capacity: %lld)"), NewCapacity);
 		}
 	}
 
